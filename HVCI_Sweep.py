@@ -1,5 +1,7 @@
 import numpy as np
 from numba import njit
+import matplotlib
+matplotlib.use("Agg")   # disable GUI backend
 import matplotlib.pyplot as plt
 
 # cpnstants 
@@ -152,226 +154,174 @@ def RK4_step(V, n, m, h, w, g_exc, g_inh, dt, EL, GKHT):
 
     return V_new, n_new, m_new, h_new, w_new
 
-# sweep function
+# initialize gating vars
 
 @njit
-def run_3d_sweep():
+def init_state(V0):
+    n0 = alphan(V0) / (alphan(V0) + betan(V0))
+    m0 = alpham(V0) / (alpham(V0) + betam(V0))
+    h0 = alphah(V0) / (alphah(V0) + betah(V0))
+    w0 = 1.0 / (1.0 + np.exp(-V0 / 5.0))
+    return n0, m0, h0, w0
 
-    exc_rates   = np.linspace(50, 400, 20)  
-    GKHT_values = np.linspace(0, 1000, 20)
-    EL_values   = np.linspace(0, -200.0, 20)
+# sweep function
+@njit
+def run_3d_sweep(noise_rates, uva_rate, GKHT_values, EL_values):
 
     dt = 0.001
     T_end = 200.0
     num_steps = int(T_end / dt)
 
-    rates = np.zeros((exc_rates.size, GKHT_values.size, EL_values.size))
+    rates = np.zeros((len(noise_rates),
+                      len(GKHT_values),
+                      len(EL_values)))
+
+    V_store = np.zeros((len(noise_rates),
+                        len(GKHT_values),
+                        len(EL_values),
+                        num_steps))
+
+    g_exc_store = np.zeros_like(V_store)
 
     t0 = 50.0
     t1 = 200.0
 
-    THRESH = -20.0
-    REFRAC_MS = 2.0
-    REFRAC_STEPS = int(REFRAC_MS / dt)
+    tau_exc = constants()[13]
+    tau_inh = constants()[14]
 
-    for a in range(exc_rates.size):
-        exc_rate = exc_rates[a]
+    for a, noise_rate in enumerate(noise_rates):
+        for b, GKHT in enumerate(GKHT_values):
+            for c, EL in enumerate(EL_values):
 
-        for b in range(GKHT_values.size):
-            GKHT = GKHT_values[b]
-
-            for c in range(EL_values.size):
-                EL = EL_values[c]
-
-                V = -65.8
-                n = 0.125
-                m = 0.0048
-                h = 9.1e-5
-                w = 1.9e-6
+                V = EL
+                n, m, h, w = init_state(V)
                 g_exc = 0.0
                 g_inh = 0.0
 
-                t = 0.0
+                dG_exc_uva = np.random.rand(5) * 0.5
+
                 spike_count = 0
-                V_prev = V
-                refrac_count = 0
+                t = 0.0
+
+                refrac = 0
+                V_prev = 0
 
                 for k in range(num_steps):
 
-                    lam = exc_rate / 1000.0
-                    if t >= t0 and t <= t1:
-                        if np.random.rand() < lam * dt:
-                            g_exc += 0.5
+                    lam_noise = noise_rate / 1000
+                    lam_uva   = uva_rate / 1000
 
-                    V, n, m, h, w = RK4_step(V, n, m, h, w, g_exc, g_inh, dt, EL, GKHT)
+                    for i in range(5):
+                        if np.random.rand() < lam_uva * dt:
+                            g_exc += dG_exc_uva[i]
+
+                    if np.random.rand() < lam_noise * dt:
+                        g_exc += 0
+
+                    V, n, m, h, w = RK4_step(V, n, m, h, w,
+                                             g_exc, g_inh, dt,
+                                             EL, GKHT)
+
+                    g_exc *= np.exp(-dt / tau_exc)
+                    g_inh *= np.exp(-dt / tau_inh)
+
                     t += dt
 
+                    
+                    V_store[a, b, c, k] = V
+                    g_exc_store[a, b, c, k] = g_exc
+
+                    
                     if t0 < t < t1:
-                        if refrac_count == 0:
+                        THRESH = -20.0
+                        REFRAC = int(2.0 / dt)   # 2 ms refractory
+
+                        if refrac == 0:
                             if V_prev < THRESH and V >= THRESH:
                                 spike_count += 1
-                                refrac_count = REFRAC_STEPS
+                                refrac = REFRAC
                         else:
-                            refrac_count -= 1
-
+                            refrac -= 1
                     V_prev = V
 
                 rates[a, b, c] = spike_count / ((t1 - t0) / 1000.0)
 
-    return exc_rates, GKHT_values, EL_values, rates
+    return rates, V_store, g_exc_store
 
-# running, plotting and saving sweep results
+noise_exc_rates = [250]
+uva_rate = 200
+GKHT_values = np.linspace(100, 600, 10)
+EL_values = [-75] #np.linspace(-100, -65, 4)
 
-exc_rates, GKHT_values, EL_values, rates = run_3d_sweep()
+rates, V_store, g_exc_store = run_3d_sweep(noise_exc_rates, uva_rate, GKHT_values, EL_values)
+num_exc = len(noise_exc_rates)
 
-print("3D sweep complete.")
-print("rates.shape =", rates.shape)
-
-rows = []
-for i in range(len(exc_rates)):
-    for j in range(len(GKHT_values)):
-        for k in range(len(EL_values)):
-            rows.append([
-                exc_rates[i],
-                GKHT_values[j],
-                EL_values[k],
-                rates[i, j, k]
-            ])
-
-np.savetxt("sweep_results.csv",
-           rows,
-           delimiter=",",
-           header="exc_rate,GKHT,EL,firing_rate",
-           comments="")
-
-print("Saved sweep_results.csv")
-
-num_exc = len(exc_rates)
-rows = int(np.ceil(num_exc / 2))
-cols = 2
+cols = min(2, num_exc)
+rows = int(np.ceil(num_exc / cols))
 
 fig, axes = plt.subplots(rows, cols, figsize=(12, 5 * rows))
-axes = axes.flatten()
 
-for i in range(num_exc):
+axes = np.array(axes).reshape(-1)
+
+for i, exc in enumerate(noise_exc_rates):
     ax = axes[i]
 
-    heat = rates[i, :, :]   # shape: [GKHT, EL]
+    heat = rates[i, :, :]
 
-    im = ax.imshow(heat, origin='lower', aspect='auto',
-                   extent=[EL_values[0], EL_values[-1],
-                           GKHT_values[0], GKHT_values[-1]])
+    im = ax.imshow(
+        heat,
+        origin='lower',
+        aspect='auto',
+        extent=[EL_values[0], EL_values[-1],
+                GKHT_values[0], GKHT_values[-1]]
+    )
 
-    ax.set_title(f"exc_rate = {exc_rates[i]} Hz")
+    ax.set_title(f"Noise Rate = {exc} Hz")
     ax.set_xlabel("EL (mV)")
     ax.set_ylabel("GKHT")
 
     fig.colorbar(im, ax=ax, label="Firing Rate (Hz)")
 
-for j in range(i+1, len(axes)):
-    axes[j].axis('off')
+plt.savefig("heatmap_all.png", dpi=150)
+plt.close()
 
-plt.tight_layout()
-plt.show()
+dt = 0.001
+num_steps = V_store.shape[-1]
+t = np.arange(num_steps) * dt
 
-def simulate_trace(exc_rate, GKHT_default=1500.0, EL_default=-20.0):
-    dt = 0.001
-    T_end = 200.0
-    num_steps = int(T_end / dt)
-
-    V_trace = np.zeros(num_steps)
-    t_trace = np.zeros(num_steps)
-
-    # Initial conditions
-    V = -65.8
-    n = 0.125
-    m = 0.0048
-    h = 9.1e-5
-    w = 1.9e-6
-    g_exc = 0.0
-    g_inh = 0.0
-
-    t = 0.0
-
-    for k in range(num_steps):
-
-        # Poisson excitation
-        lam = exc_rate / 1000.0
-        if np.random.rand() < lam * dt:
-            g_exc += 0.5
-
-        V, n, m, h, w = RK4_step(V, n, m, h, w, g_exc, g_inh, dt, EL_default, GKHT_default)
-        t += dt
-
-        V_trace[k] = V
-        t_trace[k] = t
-
-    return t_trace, V_trace
-
-
-def simulate_trace(exc_rate, GKHT, EL):
-    dt = 0.001
-    T_end = 200.0
-    num_steps = int(T_end / dt)
-
-    V_trace = np.zeros(num_steps)
-    t_trace = np.zeros(num_steps)
-
-    # Initial conditions
-    V = -65.0
-    n = alphan(V) / (alphan(V) + betan(V))
-    m = alpham(V) / (alpham(V) + betam(V))
-    h = alphah(V) / (alphah(V) + betah(V))
-    w = 1.0 / (1.0 + np.exp(-V / 5.0))
-    g_exc = 0.0
-    g_inh = 0.0
-
-    t = 0.0
-
-    for k in range(num_steps):
-
-        # Poisson excitation
-        lam = exc_rate / 1000.0
-        if np.random.rand() < lam * dt:
-            g_exc += 0.5
-
-        V, n, m, h, w = RK4_step(V, n, m, h, w, g_exc, g_inh, dt, EL, GKHT)
-        t += dt
-
-        V_trace[k] = V
-        t_trace[k] = t * 1000.0   # convert to ms
-
-    return t_trace, V_trace
-
-
-# for plotting v vs t
-"""
-for exc in exc_rates:
+for a, noise_rate in enumerate(noise_exc_rates):
 
     rows = len(GKHT_values)
     cols = len(EL_values)
 
-    fig, axes = plt.subplots(rows, cols, figsize=(4*cols, 3*rows), sharex=True, sharey=True)
-    fig.suptitle(f"Voltage Traces for exc_rate = {exc} Hz", fontsize=16)
+    fig, axes = plt.subplots(
+        rows, cols,
+        figsize=(4 * cols, 3 * rows),
+        sharex=True, sharey=True
+    )
 
-    # Ensure axes is 2D even if rows/cols = 1
-    axes = np.atleast_2d(axes)
+    axes = np.array(axes).reshape(-1)
 
-    for i, GKHT in enumerate(GKHT_values):
-        for j, EL in enumerate(EL_values):
+    # Force axes into 2D array even if rows/cols = 1
+    axes = np.array(axes).reshape(rows, cols)
 
-            t, V = simulate_trace(exc, GKHT, EL)
+    fig.suptitle(f"Voltage Traces for noise_rate = {noise_rate} Hz", fontsize=16)
 
-            ax = axes[i, j]
+    for b, GKHT in enumerate(GKHT_values):
+        for c, EL in enumerate(EL_values):
+
+            V = V_store[a, b, c, :]
+
+            ax = axes[b, c]
             ax.plot(t, V, lw=1.0)
 
-            if i == rows - 1:
+            if b == rows - 1:
                 ax.set_xlabel(f"EL = {EL} mV")
-            if j == 0:
+            if c == 0:
                 ax.set_ylabel(f"GKHT = {GKHT}")
 
             ax.grid(True)
 
-    plt.tight_layout()
-    plt.show()
-"""
+plt.tight_layout()
+plt.savefig(f"vtracegrid{noise_rate}.png", dpi=150)
+plt.close()
